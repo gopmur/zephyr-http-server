@@ -1,7 +1,7 @@
 #include "zephyr/drivers/gpio.h"
 #include "zephyr/logging/log.h"
 #include "zephyr/net/dhcpv4_server.h"
-#include "zephyr/net/http/method.h"
+
 #include "zephyr/net/http/server.h"
 #include "zephyr/net/http/service.h"
 #include "zephyr/net/net_if.h"

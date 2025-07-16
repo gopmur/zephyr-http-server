@@ -1,7 +1,14 @@
 import errno
 import os
+import random
+import string
 import sys
 
+def generate_random_string(len=16):
+  random_string = ""
+  for _ in range(len):
+    random_string += random.choice(string.ascii_letters + string.digits)
+  return random_string 
 
 def generate_static_resources(rel_path: str, base_path: str) -> str:
   full_path = f"{base_path}/{rel_path}"
@@ -16,12 +23,16 @@ def generate_static_resources(rel_path: str, base_path: str) -> str:
       resource_path = f"{rel_path}/{entry.name}" if rel_path else entry.name
       c_friendly_resource_path = resource_path.replace(
           ".", "_").replace("/", "_").replace("-", "_")
+      resource_detail_var_name = f"{c_friendly_resource_path}_detail_{generate_random_string()}"
+      resource_data_var_name = f"{c_friendly_resource_path}_data_{generate_random_string()}"
+      resource_var_name = f"{c_friendly_resource_path}_{generate_random_string()}"
+      
       output += f"""
-static const uint8_t {c_friendly_resource_path}[] = {{ 
+static const uint8_t {resource_data_var_name}[] = {{ 
   #include "assets/static/{resource_path}.gz.inc" 
 }}; 
 
-static struct http_resource_detail_static {c_friendly_resource_path}_detail = {{ 
+static struct http_resource_detail_static {resource_detail_var_name} = {{ 
   .common = 
     {{ 
       .bitmask_of_supported_http_methods = BIT(HTTP_GET), 
@@ -29,10 +40,10 @@ static struct http_resource_detail_static {c_friendly_resource_path}_detail = {{
       .content_type = "text/html", 
       .type = HTTP_RESOURCE_TYPE_STATIC, 
     }}, 
-  .static_data = {c_friendly_resource_path}, 
-  .static_data_len = sizeof({c_friendly_resource_path}), 
+  .static_data = {resource_data_var_name}, 
+  .static_data_len = sizeof({resource_data_var_name}), 
 }}; 
-HTTP_RESOURCE_DEFINE({c_friendly_resource_path}_resource, http_service, "{uri}", &{c_friendly_resource_path}_detail); 
+HTTP_RESOURCE_DEFINE({resource_var_name}, http_service, "{uri}", &{resource_detail_var_name}); 
 """
   return output
 

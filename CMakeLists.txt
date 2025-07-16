@@ -22,7 +22,15 @@ foreach(STATIC_ASSET ${STATIC_ASSETS})
   generate_inc_file_for_target(app "${STATIC_ASSET}" "${OUTPUT_ASSET}" "--gzip")
 endforeach()
 
-execute_process(COMMAND python ${CMAKE_SOURCE_DIR}/main/scripts/generate_static_resources.py ${CMAKE_SOURCE_DIR}/main/assets/static OUTPUT_FILE "${GEN_DIR}/http_resources.h")
+execute_process(
+  COMMAND python ${CMAKE_SOURCE_DIR}/main/scripts/generate_static_resources.py ${CMAKE_SOURCE_DIR}/main/assets/static 
+  OUTPUT_FILE "${GEN_DIR}/http_resources.h"
+  RESULT_VARIABLE HTTP_RESOURCE_GENERATION_RESULT
+)
+
+if(NOT HTTP_RESOURCE_GENERATION_RESULT EQUAL 0)
+  message(FATAL_ERROR "HTTP static resources failed to generate")
+endif()
 
 zephyr_linker_sources(SECTIONS sections-rom.ld)
 
