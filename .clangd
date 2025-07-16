@@ -1,0 +1,9 @@
+CompileFlags:
+  CompilationDatabase: build
+  Remove: [
+    "-fno-reorder-functions",
+    "-fno-printf-return-value",
+    "-mlongcalls",
+    "-fstrict-volatile-bitfields",
+    "-mfp16-format=ieee"
+  ]
