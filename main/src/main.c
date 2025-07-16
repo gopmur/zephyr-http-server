@@ -1,7 +1,6 @@
-#include "zephyr/drivers/gpio.h"
-#include "zephyr/logging/log.h"
-#include "zephyr/net/dhcpv4_server.h"
 
+#include "zephyr/net/dhcpv4_server.h"
+#include "http_resources.h"
 #include "zephyr/net/http/server.h"
 #include "zephyr/net/http/service.h"
 #include "zephyr/net/net_if.h"
@@ -16,7 +15,8 @@ HTTP_SERVICE_DEFINE(http_service,
                     "Default http service on 80",
                     NULL);
 
-#include "http_resources.h"
+REGISTER_STATIC_RESOURCES(http_server)
+
 int main() {
   struct net_if* ethernet_interface = net_if_get_default();
 
