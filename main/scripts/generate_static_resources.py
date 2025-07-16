@@ -3,7 +3,7 @@ import os
 import random
 import string
 import sys
-
+import mimetypes
 
 def generate_random_string(len=16):
   random_string = ""
@@ -57,7 +57,7 @@ static struct http_resource_detail_static {resource_detail_var_name} = {{ \\
     {{ \\
       .bitmask_of_supported_http_methods = BIT(HTTP_GET), \\
       .content_encoding = "gzip", \\
-      .content_type = "text/html", \\
+      .content_type = "{mimetypes.guess_type(entry.name)[0]}", \\
       .type = HTTP_RESOURCE_TYPE_STATIC, \\
     }}, \\
   .static_data = {resource_data_var_name}, \\
