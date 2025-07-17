@@ -1,10 +1,13 @@
-
 #include "zephyr/net/dhcpv4_server.h"
-#include "http_resources.h"
 #include "zephyr/net/http/server.h"
 #include "zephyr/net/http/service.h"
 #include "zephyr/net/net_if.h"
 #include "zephyr/net/net_ip.h"
+#include "zephyr/net/socket.h"
+
+#include "http_resources.h"
+#include "zephyr/sys/printk.h"
+#include <stdio.h>
 
 static uint16_t http_port = 80;
 HTTP_SERVICE_DEFINE(http_service,
@@ -17,9 +20,44 @@ HTTP_SERVICE_DEFINE(http_service,
 
 REGISTER_STATIC_RESOURCES(http_server)
 
+typedef union _DNSFlags {
+  struct {
+    uint16_t QR : 1;
+    uint16_t OPCODE : 4;
+    uint16_t AA : 1;
+    uint16_t TC : 1;
+    uint16_t RD : 1;
+    uint16_t RA : 1;
+    uint16_t Z : 1;
+    uint16_t AD : 1;
+    uint16_t CD : 1;
+    uint16_t RCODE : 4;
+  } b;
+  uint16_t u16;
+} DNSFlags;
+
+typedef struct _DNSHeader {
+  uint16_t transaction_id;
+  DNSFlags flags;
+  uint16_t number_of_questions;
+  uint16_t number_of_answers;
+  uint16_t number_of_authority_rrs;
+  uint16_t number_of_additional_rrs;
+} DNSHeader;
+
+typedef struct _DNSTypeClass {
+  uint16_t type;
+  uint16_t class;
+} DNSTypeClass;
+
+typedef enum _DNSParserState {
+  DNS_PARSER_STATE_HEADER,
+  DNS_PARSER_STATE_HOSTNAME,
+  DNS_PARSER_STATE_TYPE_CLASS,
+} DNSParserState;
+
 int main() {
   struct net_if* ethernet_interface = net_if_get_default();
-
   struct in_addr interface_address;
   struct in_addr subnet_mask;
   struct in_addr dhcp_base_address;
@@ -37,5 +75,93 @@ int main() {
 
   http_server_start();
 
+  int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+  struct sockaddr_in sock_addres = {
+      .sin_addr = interface_address,
+      .sin_port = htons(53),
+      .sin_family = AF_INET,
+  };
+
+  int ret =
+      bind(sock, (struct sockaddr*)&sock_addres, sizeof(struct sockaddr_in));
+  if (ret != 0) {
+    printk("FUCK\n");
+  }
+
+  int packet_received = 0;
+  int domain_index = 0;
+  static uint8_t domain_buffer[64];
+  static DNSTypeClass dns_type_class;
+  static DNSHeader dns_header;
+  static uint8_t buffer[512];
+  int buffer_index = 0;
+
+  DNSParserState dns_parser_state = DNS_PARSER_STATE_HEADER;
+  while (true) {
+    struct sockaddr_in client_address;
+    socklen_t client_address_len = sizeof(struct sockaddr_in);
+    int received_bytes =
+        recvfrom(sock, buffer, 512, 0, (struct sockaddr*)&client_address,
+                 &client_address_len);
+
+    buffer_index = 0;
+    while (buffer_index < received_bytes) {
+      switch (dns_parser_state) {
+        case DNS_PARSER_STATE_HEADER:
+          if (buffer_index + sizeof(DNSHeader) < received_bytes) {
+            memcpy(&((uint8_t*)(&dns_header))[packet_received],
+                   &buffer[buffer_index], received_bytes - buffer_index);
+            packet_received += received_bytes - buffer_index;
+          } else {
+            memcpy(&((uint8_t*)(&dns_header))[packet_received],
+                   &buffer[buffer_index], sizeof(DNSHeader));
+            packet_received += sizeof(dns_header);
+            domain_index = 0;
+            dns_parser_state = DNS_PARSER_STATE_HOSTNAME;
+          }
+          break;
+        case DNS_PARSER_STATE_HOSTNAME:
+          while (buffer_index < received_bytes &&
+                 buffer[buffer_index] != '\0') {
+            domain_buffer[domain_index] = buffer[buffer_index];
+            domain_index++;
+            buffer_index++;
+          }
+          if (buffer_index < received_bytes) {
+            domain_buffer[domain_index] = '\0';
+            dns_parser_state = DNS_PARSER_STATE_TYPE_CLASS;
+          }
+          break;
+        case DNS_PARSER_STATE_TYPE_CLASS:
+          if (buffer_index + sizeof(DNSTypeClass) < received_bytes) {
+            memcpy(
+                &((uint8_t*)(&dns_type_class))[packet_received - domain_index -
+                                               sizeof(DNSHeader)],
+                &buffer[buffer_index], received_bytes - buffer_index);
+            packet_received += received_bytes - buffer_index;
+          } else {
+            memcpy(
+                &((uint8_t*)(&dns_type_class))[packet_received - domain_index -
+                                               sizeof(DNSHeader)],
+                &buffer[buffer_index], sizeof(uint16_t));
+            packet_received = 0;
+            dns_parser_state = DNS_PARSER_STATE_HEADER;
+            printf("DNS transaction id:           %x", dns_header.transaction_id);
+            printf("DNS flags:                    %x", dns_header.flags.u16);
+            printf("DNS number of questions:      %d", dns_header.number_of_questions);
+            printf("DNS number of answers id:     %d", dns_header.number_of_answers);
+            printf("DNS number of authority RRs:  %d", dns_header.number_of_authority_rrs);
+            printf("DNS number of additional RRs: %d", dns_header.number_of_additional_rrs);
+            printf("DNS name:                     %s", domain_buffer);
+            printf("DNS type:                     %x", dns_type_class.type);
+            printf("DNS class id:                 %x", dns_type_class.class);
+            printf("======================================");
+            fflush(stdout);
+          }
+          break;
+      }
+    }
+  }
   return 0;
 }
