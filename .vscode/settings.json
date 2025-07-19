@@ -11,5 +11,6 @@
     "printk",
     "WORKQUEUE",
     "ZVFS"
-  ]
+  ],
+  "cortex-debug.variableUseNaturalFormat": true
 }

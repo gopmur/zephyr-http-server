@@ -3,11 +3,21 @@
 #include "zephyr/net/http/service.h"
 #include "zephyr/net/net_if.h"
 #include "zephyr/net/net_ip.h"
-#include "zephyr/net/socket.h"
 
-#include "http_resources.h"
-#include "zephyr/sys/printk.h"
 #include <stdio.h>
+#include "http_resources.h"
+
+#define BYTE_INVERSE_16(n) (n >> 8) | (n << 8)
+
+void str_replace(char* str, char old, char new) {
+  int i = 0;
+  while (str[i] != '\0') {
+    if (str[i] == old) {
+      str[i] = new;
+    }
+    i++;
+  }
+}
 
 static uint16_t http_port = 80;
 HTTP_SERVICE_DEFINE(http_service,
@@ -109,16 +119,29 @@ int main() {
     while (buffer_index < received_bytes) {
       switch (dns_parser_state) {
         case DNS_PARSER_STATE_HEADER:
-          if (buffer_index + sizeof(DNSHeader) < received_bytes) {
+          if (buffer_index + sizeof(DNSHeader) > received_bytes) {
             memcpy(&((uint8_t*)(&dns_header))[packet_received],
                    &buffer[buffer_index], received_bytes - buffer_index);
             packet_received += received_bytes - buffer_index;
+            buffer_index += received_bytes - buffer_index;
           } else {
             memcpy(&((uint8_t*)(&dns_header))[packet_received],
                    &buffer[buffer_index], sizeof(DNSHeader));
-            packet_received += sizeof(dns_header);
+            packet_received += sizeof(DNSHeader);
+            buffer_index += sizeof(DNSHeader);
             domain_index = 0;
             dns_parser_state = DNS_PARSER_STATE_HOSTNAME;
+            dns_header.flags.u16 = BYTE_INVERSE_16(dns_header.flags.u16);
+            dns_header.number_of_additional_rrs =
+                BYTE_INVERSE_16(dns_header.number_of_additional_rrs);
+            dns_header.number_of_answers =
+                BYTE_INVERSE_16(dns_header.number_of_answers);
+            dns_header.number_of_authority_rrs =
+                BYTE_INVERSE_16(dns_header.number_of_authority_rrs);
+            dns_header.number_of_questions =
+                BYTE_INVERSE_16(dns_header.number_of_questions);
+            dns_header.transaction_id =
+                BYTE_INVERSE_16(dns_header.transaction_id);
           }
           break;
         case DNS_PARSER_STATE_HOSTNAME:
@@ -127,36 +150,48 @@ int main() {
             domain_buffer[domain_index] = buffer[buffer_index];
             domain_index++;
             buffer_index++;
+            packet_received++;
           }
           if (buffer_index < received_bytes) {
             domain_buffer[domain_index] = '\0';
             dns_parser_state = DNS_PARSER_STATE_TYPE_CLASS;
           }
+          buffer_index++;
           break;
         case DNS_PARSER_STATE_TYPE_CLASS:
-          if (buffer_index + sizeof(DNSTypeClass) < received_bytes) {
+          if (buffer_index + sizeof(DNSTypeClass) > received_bytes) {
             memcpy(
                 &((uint8_t*)(&dns_type_class))[packet_received - domain_index -
                                                sizeof(DNSHeader)],
                 &buffer[buffer_index], received_bytes - buffer_index);
             packet_received += received_bytes - buffer_index;
+            buffer_index += received_bytes - buffer_index;
           } else {
             memcpy(
                 &((uint8_t*)(&dns_type_class))[packet_received - domain_index -
                                                sizeof(DNSHeader)],
-                &buffer[buffer_index], sizeof(uint16_t));
+                &buffer[buffer_index], sizeof(DNSTypeClass));
+            dns_type_class.class = BYTE_INVERSE_16(dns_type_class.class);
+            dns_type_class.type = BYTE_INVERSE_16(dns_type_class.type);
             packet_received = 0;
+            buffer_index += sizeof(DNSTypeClass);
             dns_parser_state = DNS_PARSER_STATE_HEADER;
-            printf("DNS transaction id:           %x", dns_header.transaction_id);
-            printf("DNS flags:                    %x", dns_header.flags.u16);
-            printf("DNS number of questions:      %d", dns_header.number_of_questions);
-            printf("DNS number of answers id:     %d", dns_header.number_of_answers);
-            printf("DNS number of authority RRs:  %d", dns_header.number_of_authority_rrs);
-            printf("DNS number of additional RRs: %d", dns_header.number_of_additional_rrs);
-            printf("DNS name:                     %s", domain_buffer);
-            printf("DNS type:                     %x", dns_type_class.type);
-            printf("DNS class id:                 %x", dns_type_class.class);
-            printf("======================================");
+            str_replace(domain_buffer, 3, '.');
+            printf("DNS transaction id:           %x\n",
+                   dns_header.transaction_id);
+            printf("DNS flags:                    %x\n", dns_header.flags.u16);
+            printf("DNS number of questions:      %d\n",
+                   dns_header.number_of_questions);
+            printf("DNS number of answers id:     %d\n",
+                   dns_header.number_of_answers);
+            printf("DNS number of authority RRs:  %d\n",
+                   dns_header.number_of_authority_rrs);
+            printf("DNS number of additional RRs: %d\n",
+                   dns_header.number_of_additional_rrs);
+            printf("DNS name:                     %s\n", domain_buffer);
+            printf("DNS type:                     %x\n", dns_type_class.type);
+            printf("DNS class id:                 %x\n", dns_type_class.class);
+            printf("======================================\n");
             fflush(stdout);
           }
           break;
