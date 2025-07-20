@@ -1,11 +1,16 @@
+#include "zephyr/logging/log.h"
 #include "zephyr/net/dhcpv4_server.h"
 #include "zephyr/net/http/server.h"
 #include "zephyr/net/http/service.h"
 #include "zephyr/net/net_if.h"
 #include "zephyr/net/net_ip.h"
 
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "http_resources.h"
+
+LOG_MODULE_REGISTER(MAIN);
 
 #define BYTE_INVERSE_16(n) (n >> 8) | (n << 8)
 
@@ -55,16 +60,145 @@ typedef struct _DNSHeader {
   uint16_t number_of_additional_rrs;
 } DNSHeader;
 
-typedef struct _DNSTypeClass {
+typedef struct _DNSQuery {
+  char* name;
+  int name_len;
   uint16_t type;
   uint16_t class;
-} DNSTypeClass;
+} DNSQuery;
+
+typedef struct _DNSPacket {
+  DNSHeader header;
+  DNSQuery* queries;
+} DNSPacket;
 
 typedef enum _DNSParserState {
   DNS_PARSER_STATE_HEADER,
   DNS_PARSER_STATE_HOSTNAME,
   DNS_PARSER_STATE_TYPE_CLASS,
 } DNSParserState;
+
+void dns_header_be_to_le(DNSPacket* packet) {
+  packet->header.flags.u16 = BYTE_INVERSE_16(packet->header.flags.u16);
+  packet->header.number_of_additional_rrs =
+      BYTE_INVERSE_16(packet->header.number_of_additional_rrs);
+  packet->header.number_of_answers =
+      BYTE_INVERSE_16(packet->header.number_of_answers);
+  packet->header.number_of_authority_rrs =
+      BYTE_INVERSE_16(packet->header.number_of_authority_rrs);
+  packet->header.number_of_questions =
+      BYTE_INVERSE_16(packet->header.number_of_questions);
+  packet->header.transaction_id =
+      BYTE_INVERSE_16(packet->header.transaction_id);
+}
+
+void dns_query_type_class_be_to_le(DNSPacket* packet, int query_index) {
+  packet->queries[query_index].type =
+      BYTE_INVERSE_16(packet->queries[query_index].type);
+  packet->queries[query_index].class =
+      BYTE_INVERSE_16(packet->queries[query_index].class);
+}
+
+void print_dns_packet(DNSPacket* packet) {
+  printf("transaction id: %x\n", packet->header.transaction_id);
+  printf("flags:          %x\n", packet->header.flags.u16);
+  printf("questions:      %d\n", packet->header.number_of_questions);
+  printf("answers:        %d\n", packet->header.number_of_answers);
+  printf("authority RRs:  %d\n", packet->header.number_of_authority_rrs);
+  printf("additional RRs: %d\n", packet->header.number_of_additional_rrs);
+  printf("name:           %s\n", packet->queries[0].name);
+  printf("type:           %x\n", packet->queries[0].type);
+  printf("class:          %x\n", packet->queries[0].class);
+  printf("======================================\n");
+  fflush(stdout);
+}
+
+void dns_service_start(struct in_addr interface_address) {
+#define BUFFER_SIZE 128
+  int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+  struct sockaddr_in sock_addres = {
+      .sin_addr = interface_address,
+      .sin_port = htons(53),
+      .sin_family = AF_INET,
+  };
+
+  int ret =
+      bind(sock, (struct sockaddr*)&sock_addres, sizeof(struct sockaddr_in));
+  if (ret != 0) {
+    LOG_ERR("Bind failed");
+  }
+
+  static DNSPacket packet;
+  static uint8_t buffer[BUFFER_SIZE];
+  int buffer_index = 0;
+
+  DNSParserState dns_parser_state = DNS_PARSER_STATE_HEADER;
+  while (true) {
+    struct sockaddr_in client_address;
+    socklen_t client_address_len = sizeof(struct sockaddr_in);
+    int received_bytes =
+        recvfrom(sock, buffer, BUFFER_SIZE, 0,
+                 (struct sockaddr*)&client_address, &client_address_len);
+
+    buffer_index = 0;
+    dns_parser_state = DNS_PARSER_STATE_HEADER;
+    while (buffer_index < received_bytes) {
+      if (dns_parser_state == DNS_PARSER_STATE_HEADER) {
+        if (buffer_index + sizeof(DNSHeader) > received_bytes) {
+          break;
+        }
+        memcpy(&packet.header, &buffer[buffer_index], sizeof(DNSHeader));
+
+        buffer_index += sizeof(DNSHeader);
+        dns_parser_state = DNS_PARSER_STATE_HOSTNAME;
+        dns_header_be_to_le(&packet);
+        packet.queries =
+            packet.header.number_of_questions
+                ? malloc(packet.header.number_of_questions * sizeof(DNSQuery))
+                : NULL;
+        for (int i = 0; i < packet.header.number_of_questions; i++) {
+          packet.queries[i].name = NULL;
+          packet.queries[i].name_len = 0;
+        }
+      } else if (dns_parser_state == DNS_PARSER_STATE_HOSTNAME) {
+        int label_len = buffer[buffer_index];
+        if (buffer_index + label_len > received_bytes) {
+          break;
+        }
+        if (label_len == 0 && packet.queries[0].name != NULL) {
+          packet.queries[0].name[packet.queries[0].name_len - 1] = '\0';
+          // here name_len will represent the string len not array len
+          packet.queries[0].name_len--;
+          dns_parser_state = DNS_PARSER_STATE_TYPE_CLASS;
+          continue;
+        }
+        buffer_index++;
+        // len here represent the array len not string len
+        int name_len = packet.queries[0].name_len;
+        int new_name_len = name_len + label_len + 1;
+        packet.queries[0].name = realloc(packet.queries[0].name, new_name_len);
+        memcpy(&packet.queries[0].name[name_len], &buffer[buffer_index],
+               label_len);
+        packet.queries[0].name[new_name_len - 1] = '.';
+        packet.queries[0].name_len = new_name_len;
+        buffer_index += label_len;
+      } else if (dns_parser_state == DNS_PARSER_STATE_TYPE_CLASS) {
+        if (buffer_index + 2 * sizeof(uint16_t) > received_bytes) {
+          break;
+        }
+        memcpy(&packet.queries[0].type, &buffer[buffer_index],
+               sizeof(uint16_t));
+        buffer_index += sizeof(uint16_t);
+        memcpy(&packet.queries[0].class, &buffer[buffer_index],
+               sizeof(uint16_t));
+        buffer_index += sizeof(uint16_t);
+        dns_query_type_class_be_to_le(&packet, 0);
+        print_dns_packet(&packet);
+      }
+    }
+  }
+}
 
 int main() {
   struct net_if* ethernet_interface = net_if_get_default();
@@ -85,93 +219,6 @@ int main() {
 
   http_server_start();
 
-  int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-
-  struct sockaddr_in sock_addres = {
-      .sin_addr = interface_address,
-      .sin_port = htons(53),
-      .sin_family = AF_INET,
-  };
-
-  int ret =
-      bind(sock, (struct sockaddr*)&sock_addres, sizeof(struct sockaddr_in));
-  if (ret != 0) {
-    printk("FUCK\n");
-  }
-
-  int domain_index = 0;
-  static uint8_t domain_buffer[64];
-  static DNSTypeClass dns_type_class;
-  static DNSHeader dns_header;
-  static uint8_t buffer[512];
-  int buffer_index = 0;
-
-  DNSParserState dns_parser_state = DNS_PARSER_STATE_HEADER;
-  while (true) {
-    struct sockaddr_in client_address;
-    socklen_t client_address_len = sizeof(struct sockaddr_in);
-    int received_bytes =
-        recvfrom(sock, buffer, sizeof(buffer), 0,
-                 (struct sockaddr*)&client_address, &client_address_len);
-
-    buffer_index = 0;
-    while (buffer_index < received_bytes) {
-      if (dns_parser_state == DNS_PARSER_STATE_HEADER) {
-        if (buffer_index + sizeof(DNSHeader) > received_bytes) {
-          break;
-        }
-        memcpy(&dns_header, &buffer[buffer_index], sizeof(DNSHeader));
-        buffer_index += sizeof(DNSHeader);
-        dns_parser_state = DNS_PARSER_STATE_HOSTNAME;
-        dns_header.flags.u16 = BYTE_INVERSE_16(dns_header.flags.u16);
-        dns_header.number_of_additional_rrs =
-            BYTE_INVERSE_16(dns_header.number_of_additional_rrs);
-        dns_header.number_of_answers =
-            BYTE_INVERSE_16(dns_header.number_of_answers);
-        dns_header.number_of_authority_rrs =
-            BYTE_INVERSE_16(dns_header.number_of_authority_rrs);
-        dns_header.number_of_questions =
-            BYTE_INVERSE_16(dns_header.number_of_questions);
-        dns_header.transaction_id = BYTE_INVERSE_16(dns_header.transaction_id);
-      } else if (dns_parser_state == DNS_PARSER_STATE_HOSTNAME) {
-        domain_index = 0;
-        while (buffer_index < received_bytes && buffer[buffer_index] != '\0') {
-          domain_buffer[domain_index] = buffer[buffer_index];
-          domain_index++;
-          buffer_index++;
-        }
-        if (buffer_index < received_bytes) {
-          domain_buffer[domain_index] = '\0';
-          dns_parser_state = DNS_PARSER_STATE_TYPE_CLASS;
-        }
-        buffer_index++;
-      } else if (dns_parser_state == DNS_PARSER_STATE_TYPE_CLASS) {
-        if (buffer_index + sizeof(DNSTypeClass) > received_bytes) {
-          break;
-        }
-        memcpy(&dns_type_class, &buffer[buffer_index], sizeof(DNSTypeClass));
-        dns_type_class.class = BYTE_INVERSE_16(dns_type_class.class);
-        dns_type_class.type = BYTE_INVERSE_16(dns_type_class.type);
-        buffer_index += sizeof(DNSTypeClass);
-        dns_parser_state = DNS_PARSER_STATE_HEADER;
-        str_replace(domain_buffer, 3, '.');
-        printf("DNS transaction id:           %x\n", dns_header.transaction_id);
-        printf("DNS flags:                    %x\n", dns_header.flags.u16);
-        printf("DNS number of questions:      %d\n",
-               dns_header.number_of_questions);
-        printf("DNS number of answers id:     %d\n",
-               dns_header.number_of_answers);
-        printf("DNS number of authority RRs:  %d\n",
-               dns_header.number_of_authority_rrs);
-        printf("DNS number of additional RRs: %d\n",
-               dns_header.number_of_additional_rrs);
-        printf("DNS name:                     %s\n", domain_buffer);
-        printf("DNS type:                     %x\n", dns_type_class.type);
-        printf("DNS class id:                 %x\n", dns_type_class.class);
-        printf("======================================\n");
-        fflush(stdout);
-      }
-    }
-  }
+  dns_service_start(interface_address);
   return 0;
 }
