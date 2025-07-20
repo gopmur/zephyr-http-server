@@ -99,6 +99,7 @@ void dns_query_type_class_be_to_le(DNSPacket* packet, int query_index) {
       BYTE_INVERSE_16(packet->queries[query_index].class);
 }
 
+
 void print_dns_packet(DNSPacket* packet) {
   printf("transaction id: %x\n", packet->header.transaction_id);
   printf("flags:          %x\n", packet->header.flags.u16);
@@ -111,6 +112,23 @@ void print_dns_packet(DNSPacket* packet) {
   printf("class:          %x\n", packet->queries[0].class);
   printf("======================================\n");
   fflush(stdout);
+}
+
+void dns_packet_received_callback(int sock, DNSPacket* packet) {
+  print_dns_packet(packet);
+}
+
+void free_dns_packet(DNSPacket* packet) {
+  int number_of_questions = packet->header.number_of_questions;
+  if (number_of_questions == 0 || packet->queries == NULL) {
+    return;
+  }
+  for (int i = 0; i < number_of_questions; i++) {
+    if (packet->queries[i].name) {
+      free(packet->queries[i].name);
+    }
+  }
+  free(packet->queries);
 }
 
 void dns_service_start(struct in_addr interface_address) {
@@ -194,7 +212,8 @@ void dns_service_start(struct in_addr interface_address) {
                sizeof(uint16_t));
         buffer_index += sizeof(uint16_t);
         dns_query_type_class_be_to_le(&packet, 0);
-        print_dns_packet(&packet);
+        dns_packet_received_callback(sock, &packet);
+        free_dns_packet(&packet);
       }
     }
   }
