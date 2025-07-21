@@ -1,3 +1,4 @@
+#include "sys/socket.h"
 #include "zephyr/logging/log.h"
 #include "zephyr/net/dhcpv4_server.h"
 #include "zephyr/net/http/server.h"
@@ -8,11 +9,15 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "http_resources.h"
 
 LOG_MODULE_REGISTER(MAIN);
 
 #define BYTE_INVERSE_16(n) (n >> 8) | (n << 8)
+#define BYTE_INVERSE_32(n)                                                  \
+  BYTE_INVERSE_16((uint16_t)(n >> 16)) >> 16 | BYTE_INVERSE_16((uint16_t)n) \
+                                                   << 16
 
 void str_replace(char* str, char old, char new) {
   int i = 0;
@@ -37,16 +42,16 @@ REGISTER_STATIC_RESOURCES(http_server)
 
 typedef union _DNSFlags {
   struct {
-    uint16_t QR : 1;
-    uint16_t OPCODE : 4;
-    uint16_t AA : 1;
-    uint16_t TC : 1;
-    uint16_t RD : 1;
-    uint16_t RA : 1;
-    uint16_t Z : 1;
-    uint16_t AD : 1;
-    uint16_t CD : 1;
     uint16_t RCODE : 4;
+    uint16_t CD : 1;
+    uint16_t AD : 1;
+    uint16_t Z : 1;
+    uint16_t RA : 1;
+    uint16_t RD : 1;
+    uint16_t TC : 1;
+    uint16_t AA : 1;
+    uint16_t OPCODE : 4;
+    uint16_t QR : 1;
   } b;
   uint16_t u16;
 } DNSFlags;
@@ -67,9 +72,19 @@ typedef struct _DNSQuery {
   uint16_t class;
 } DNSQuery;
 
+typedef struct _DNSAnswers {
+  char* name;
+  uint16_t type;
+  uint16_t class;
+  uint32_t ttl;
+  uint16_t rdlength;
+  uint32_t rdata;
+} DNSAnswers;
+
 typedef struct _DNSPacket {
   DNSHeader header;
   DNSQuery* queries;
+  DNSAnswers* answers;
 } DNSPacket;
 
 typedef enum _DNSParserState {
@@ -78,7 +93,7 @@ typedef enum _DNSParserState {
   DNS_PARSER_STATE_TYPE_CLASS,
 } DNSParserState;
 
-void dns_header_be_to_le(DNSPacket* packet) {
+void dns_header_byte_inverse(DNSPacket* packet) {
   packet->header.flags.u16 = BYTE_INVERSE_16(packet->header.flags.u16);
   packet->header.number_of_additional_rrs =
       BYTE_INVERSE_16(packet->header.number_of_additional_rrs);
@@ -92,13 +107,23 @@ void dns_header_be_to_le(DNSPacket* packet) {
       BYTE_INVERSE_16(packet->header.transaction_id);
 }
 
-void dns_query_type_class_be_to_le(DNSPacket* packet, int query_index) {
+void dns_question_byte_inverse(DNSPacket* packet, int query_index) {
   packet->queries[query_index].type =
       BYTE_INVERSE_16(packet->queries[query_index].type);
   packet->queries[query_index].class =
       BYTE_INVERSE_16(packet->queries[query_index].class);
 }
 
+void dns_answer_byte_inverse(DNSPacket* packet, int answer_index) {
+  packet->answers[answer_index].class =
+      BYTE_INVERSE_16(packet->answers[answer_index].class);
+  packet->answers[answer_index].type =
+      BYTE_INVERSE_16(packet->answers[answer_index].type);
+  packet->answers[answer_index].rdlength =
+      BYTE_INVERSE_16(packet->answers[answer_index].rdlength);
+  packet->answers[answer_index].ttl =
+      BYTE_INVERSE_32(packet->answers[answer_index].ttl);
+}
 
 void print_dns_packet(DNSPacket* packet) {
   printf("transaction id: %x\n", packet->header.transaction_id);
@@ -114,21 +139,108 @@ void print_dns_packet(DNSPacket* packet) {
   fflush(stdout);
 }
 
-void dns_packet_received_callback(int sock, DNSPacket* packet) {
+void dns_packet_received_callback(int sock,
+                                  struct sockaddr_in client_address,
+                                  socklen_t client_address_len,
+                                  DNSPacket* packet) {
+  if (packet->header.flags.b.QR == 1 ||
+      packet->header.number_of_questions == 0 ||
+      strcmp(packet->queries->name, "zephyr.local")) {
+    return;
+  }
+
+  print_dns_packet(packet);
+
+  packet->header.flags.b.QR = 1;
+  packet->header.number_of_answers = 1;
+  // packet->header.flags.b.RA = 0;
+  packet->answers = malloc(sizeof(DNSAnswers));
+  packet->answers->name = malloc(2);
+  packet->answers->name[0] = 0xc0;
+  packet->answers->name[1] = 0x0c;
+  packet->answers->class = 1;
+  packet->answers->type = 1;
+  packet->answers->ttl = 1;
+  packet->answers->rdlength = 4;
+  net_addr_pton(AF_INET, "192.168.10.1", &packet->answers->rdata);
+
+
+  dns_header_byte_inverse(packet);
+  dns_question_byte_inverse(packet, 0);
+  dns_answer_byte_inverse(packet, 0);
+
+  static uint8_t send_buffer[128];
+
+  int buffer_index = 0;
+  memcpy(&send_buffer[buffer_index], &packet->header, sizeof(DNSHeader));
+  buffer_index += sizeof(DNSHeader);
+  int label_len_index = buffer_index;
+  buffer_index++;
+  int label_len = 0;
+  int name_index = 0;
+  char c;
+  while ((c = packet->queries[0].name[name_index++])) {
+    if (c == '.') {
+      send_buffer[label_len_index] = label_len;
+      label_len = 0;
+      label_len_index = buffer_index++;
+      continue;
+    }
+    send_buffer[buffer_index] = c;
+    buffer_index++;
+    label_len++;
+  }
+  send_buffer[label_len_index] = label_len;
+  send_buffer[buffer_index] = '\0';
+  buffer_index++;
+  memcpy(&send_buffer[buffer_index], &packet->queries[0].type,
+         sizeof(uint16_t));
+  buffer_index += 2;
+  memcpy(&send_buffer[buffer_index], &packet->queries[0].class,
+         sizeof(uint16_t));
+  buffer_index += 2;
+  memcpy(&send_buffer[buffer_index], packet->answers->name, 2);
+  buffer_index += 2;
+  memcpy(&send_buffer[buffer_index], &packet->answers->type, sizeof(uint16_t));
+  buffer_index += 2;
+  memcpy(&send_buffer[buffer_index], &packet->answers->class, sizeof(uint16_t));
+  buffer_index += 2;
+  memcpy(&send_buffer[buffer_index], &packet->answers->ttl, sizeof(uint32_t));
+  buffer_index += 4;
+  memcpy(&send_buffer[buffer_index], &packet->answers->rdlength,
+         sizeof(uint16_t));
+  buffer_index += 2;
+  memcpy(&send_buffer[buffer_index], &packet->answers->rdata, sizeof(uint32_t));
+  buffer_index += 4;
+
+  sendto(sock, send_buffer, buffer_index, 0, (struct sockaddr*)&client_address,
+         client_address_len);
+  print_dns_packet(packet);
+
+  dns_header_byte_inverse(packet);
+  dns_question_byte_inverse(packet, 0);
+  dns_answer_byte_inverse(packet, 0);
+
   print_dns_packet(packet);
 }
 
 void free_dns_packet(DNSPacket* packet) {
   int number_of_questions = packet->header.number_of_questions;
-  if (number_of_questions == 0 || packet->queries == NULL) {
-    return;
-  }
+  int number_of_answers = packet->header.number_of_answers;
   for (int i = 0; i < number_of_questions; i++) {
     if (packet->queries[i].name) {
       free(packet->queries[i].name);
     }
   }
-  free(packet->queries);
+  for (int i = 0; i < number_of_answers; i++) {
+    if (packet->answers[i].name) {
+      free(packet->answers[i].name);
+    }
+  }
+  if (packet->queries)
+    free(packet->queries);
+  if (packet->answers)
+    free(packet->answers);
 }
 
 void dns_service_start(struct in_addr interface_address) {
@@ -170,11 +282,12 @@ void dns_service_start(struct in_addr interface_address) {
 
         buffer_index += sizeof(DNSHeader);
         dns_parser_state = DNS_PARSER_STATE_HOSTNAME;
-        dns_header_be_to_le(&packet);
+        dns_header_byte_inverse(&packet);
         packet.queries =
             packet.header.number_of_questions
                 ? malloc(packet.header.number_of_questions * sizeof(DNSQuery))
                 : NULL;
+        packet.answers = NULL;
         for (int i = 0; i < packet.header.number_of_questions; i++) {
           packet.queries[i].name = NULL;
           packet.queries[i].name_len = 0;
@@ -189,6 +302,7 @@ void dns_service_start(struct in_addr interface_address) {
           // here name_len will represent the string len not array len
           packet.queries[0].name_len--;
           dns_parser_state = DNS_PARSER_STATE_TYPE_CLASS;
+          buffer_index++;
           continue;
         }
         buffer_index++;
@@ -211,8 +325,10 @@ void dns_service_start(struct in_addr interface_address) {
         memcpy(&packet.queries[0].class, &buffer[buffer_index],
                sizeof(uint16_t));
         buffer_index += sizeof(uint16_t);
-        dns_query_type_class_be_to_le(&packet, 0);
-        dns_packet_received_callback(sock, &packet);
+        dns_question_byte_inverse(&packet, 0);
+        dns_answer_byte_inverse(&packet, 0);
+        dns_packet_received_callback(sock, client_address, client_address_len,
+                                     &packet);
         free_dns_packet(&packet);
       }
     }
