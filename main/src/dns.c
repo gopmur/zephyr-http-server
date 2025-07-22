@@ -172,31 +172,31 @@ void dns_service_start(struct in_addr interface_address) {
 
   DNSPacket packet;
   uint8_t buffer[buffer_size];
-  int buffer_index = 0;
+  int i = 0;
 
   DNSParserState dns_parser_state = DNS_PARSER_STATE_HEADER;
   while (true) {
     struct sockaddr_in client_address;
     socklen_t client_address_len = sizeof(struct sockaddr_in);
-    int received_bytes =
+    int bytes_received =
         recvfrom(sock, buffer, buffer_size, 0,
                  (struct sockaddr*)&client_address, &client_address_len);
 
-    buffer_index = 0;
+    i = 0;
     dns_parser_state = DNS_PARSER_STATE_HEADER;
     packet = new_dns_packet();
-    while (buffer_index < received_bytes) {
+    while (i < bytes_received) {
       if (dns_parser_state == DNS_PARSER_STATE_HEADER) {
-        if (buffer_index + sizeof(DNSHeader) > received_bytes) {
+        if (i + sizeof(DNSHeader) > bytes_received) {
           break;
         }
-        memcpy(&packet.header, &buffer[buffer_index], sizeof(DNSHeader));
-        buffer_index += sizeof(DNSHeader);
+        memcpy(&packet.header, &buffer[i], sizeof(DNSHeader));
+        i += sizeof(DNSHeader);
         dns_parser_state = DNS_PARSER_STATE_HOSTNAME;
         dns_header_byte_inverse(&packet);
       } else if (dns_parser_state == DNS_PARSER_STATE_HOSTNAME) {
-        int label_len = buffer[buffer_index];
-        if (buffer_index + label_len > received_bytes) {
+        int label_len = buffer[i];
+        if (i + label_len > bytes_received) {
           break;
         }
         if (label_len == 0 && packet.question.name != NULL) {
@@ -204,27 +204,26 @@ void dns_service_start(struct in_addr interface_address) {
           // here name_len will represent the string len not array len
           packet.question.name_len--;
           dns_parser_state = DNS_PARSER_STATE_TYPE_CLASS;
-          buffer_index++;
+          i++;
           continue;
         }
-        buffer_index++;
+        i++;
         // len here represent the array len not string len
         int name_len = packet.question.name_len;
         int new_name_len = name_len + label_len + 1;
         packet.question.name = realloc(packet.question.name, new_name_len);
-        memcpy(&packet.question.name[name_len], &buffer[buffer_index],
-               label_len);
+        memcpy(&packet.question.name[name_len], &buffer[i], label_len);
         packet.question.name[new_name_len - 1] = '.';
         packet.question.name_len = new_name_len;
-        buffer_index += label_len;
+        i += label_len;
       } else if (dns_parser_state == DNS_PARSER_STATE_TYPE_CLASS) {
-        if (buffer_index + 2 * sizeof(uint16_t) > received_bytes) {
+        if (i + 2 * sizeof(uint16_t) > bytes_received) {
           break;
         }
-        memcpy(&packet.question.type, &buffer[buffer_index], sizeof(uint16_t));
-        buffer_index += sizeof(uint16_t);
-        memcpy(&packet.question.class, &buffer[buffer_index], sizeof(uint16_t));
-        buffer_index += sizeof(uint16_t);
+        memcpy(&packet.question.type, &buffer[i], sizeof(uint16_t));
+        i += sizeof(uint16_t);
+        memcpy(&packet.question.class, &buffer[i], sizeof(uint16_t));
+        i += sizeof(uint16_t);
         dns_question_byte_inverse(&packet);
         dns_answer_byte_inverse(&packet);
         dns_packet_received_callback(sock, client_address, client_address_len,
