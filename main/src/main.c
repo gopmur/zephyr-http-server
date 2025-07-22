@@ -65,12 +65,12 @@ typedef struct _DNSHeader {
   uint16_t number_of_additional_rrs;
 } DNSHeader;
 
-typedef struct _DNSQuery {
+typedef struct _DNSQuestion {
   char* name;
   int name_len;
   uint16_t type;
   uint16_t class;
-} DNSQuery;
+} DNSQuestion;
 
 typedef struct _DNSAnswers {
   char* name;
@@ -83,8 +83,8 @@ typedef struct _DNSAnswers {
 
 typedef struct _DNSPacket {
   DNSHeader header;
-  DNSQuery* queries;
-  DNSAnswers* answers;
+  DNSQuestion question;
+  DNSAnswers answer;
 } DNSPacket;
 
 typedef enum _DNSParserState {
@@ -107,36 +107,31 @@ void dns_header_byte_inverse(DNSPacket* packet) {
       BYTE_INVERSE_16(packet->header.transaction_id);
 }
 
-void dns_question_byte_inverse(DNSPacket* packet, int query_index) {
-  packet->queries[query_index].type =
-      BYTE_INVERSE_16(packet->queries[query_index].type);
-  packet->queries[query_index].class =
-      BYTE_INVERSE_16(packet->queries[query_index].class);
+void dns_question_byte_inverse(DNSPacket* packet) {
+  packet->question.type = BYTE_INVERSE_16(packet->question.type);
+  packet->question.class = BYTE_INVERSE_16(packet->question.class);
 }
 
-void dns_answer_byte_inverse(DNSPacket* packet, int answer_index) {
-  packet->answers[answer_index].class =
-      BYTE_INVERSE_16(packet->answers[answer_index].class);
-  packet->answers[answer_index].type =
-      BYTE_INVERSE_16(packet->answers[answer_index].type);
-  packet->answers[answer_index].rdlength =
-      BYTE_INVERSE_16(packet->answers[answer_index].rdlength);
-  packet->answers[answer_index].ttl =
-      BYTE_INVERSE_32(packet->answers[answer_index].ttl);
+void dns_answer_byte_inverse(DNSPacket* packet) {
+  packet->answer.class = BYTE_INVERSE_16(packet->answer.class);
+  packet->answer.type = BYTE_INVERSE_16(packet->answer.type);
+  packet->answer.rdlength = BYTE_INVERSE_16(packet->answer.rdlength);
+  packet->answer.ttl = BYTE_INVERSE_32(packet->answer.ttl);
 }
 
 void print_dns_packet(DNSPacket* packet) {
-  printf("transaction id: %x\n", packet->header.transaction_id);
-  printf("flags:          %x\n", packet->header.flags.u16);
+  printf("transaction id: 0x%x\n", packet->header.transaction_id);
+  printf("flags:          0x%x\n", packet->header.flags.u16);
   printf("questions:      %d\n", packet->header.number_of_questions);
   printf("answers:        %d\n", packet->header.number_of_answers);
   printf("authority RRs:  %d\n", packet->header.number_of_authority_rrs);
   printf("additional RRs: %d\n", packet->header.number_of_additional_rrs);
-  printf("name:           %s\n", packet->queries[0].name);
-  printf("type:           %x\n", packet->queries[0].type);
-  printf("class:          %x\n", packet->queries[0].class);
+  printf("-------------------------------------\n");
+  printf("name:           %s\n", packet->question.name);
+  printf("type:           0x%x\n", packet->question.type);
+  printf("class:          0x%x\n", packet->question.class);
   printf("======================================\n");
-  fflush(stdout);
+  printf("\n");
 }
 
 void dns_packet_received_callback(int sock,
@@ -145,7 +140,7 @@ void dns_packet_received_callback(int sock,
                                   DNSPacket* packet) {
   if (packet->header.flags.b.QR == 1 ||
       packet->header.number_of_questions == 0 ||
-      strcmp(packet->queries->name, "zephyr.local")) {
+      strcmp(packet->question.name, "zephyr.local")) {
     return;
   }
 
@@ -154,20 +149,18 @@ void dns_packet_received_callback(int sock,
   packet->header.flags.b.QR = 1;
   packet->header.number_of_answers = 1;
   // packet->header.flags.b.RA = 0;
-  packet->answers = malloc(sizeof(DNSAnswers));
-  packet->answers->name = malloc(2);
-  packet->answers->name[0] = 0xc0;
-  packet->answers->name[1] = 0x0c;
-  packet->answers->class = 1;
-  packet->answers->type = 1;
-  packet->answers->ttl = 1;
-  packet->answers->rdlength = 4;
-  net_addr_pton(AF_INET, "192.168.10.1", &packet->answers->rdata);
-
+  packet->answer.name = malloc(2);
+  packet->answer.name[0] = 0xc0;
+  packet->answer.name[1] = 0x0c;
+  packet->answer.class = 1;
+  packet->answer.type = 1;
+  packet->answer.ttl = 1;
+  packet->answer.rdlength = 4;
+  net_addr_pton(AF_INET, "192.168.10.1", &packet->answer.rdata);
 
   dns_header_byte_inverse(packet);
-  dns_question_byte_inverse(packet, 0);
-  dns_answer_byte_inverse(packet, 0);
+  dns_question_byte_inverse(packet);
+  dns_answer_byte_inverse(packet);
 
   static uint8_t send_buffer[128];
 
@@ -179,7 +172,7 @@ void dns_packet_received_callback(int sock,
   int label_len = 0;
   int name_index = 0;
   char c;
-  while ((c = packet->queries[0].name[name_index++])) {
+  while ((c = packet->question.name[name_index++])) {
     if (c == '.') {
       send_buffer[label_len_index] = label_len;
       label_len = 0;
@@ -193,54 +186,54 @@ void dns_packet_received_callback(int sock,
   send_buffer[label_len_index] = label_len;
   send_buffer[buffer_index] = '\0';
   buffer_index++;
-  memcpy(&send_buffer[buffer_index], &packet->queries[0].type,
-         sizeof(uint16_t));
+  memcpy(&send_buffer[buffer_index], &packet->question.type, sizeof(uint16_t));
   buffer_index += 2;
-  memcpy(&send_buffer[buffer_index], &packet->queries[0].class,
-         sizeof(uint16_t));
+  memcpy(&send_buffer[buffer_index], &packet->question.class, sizeof(uint16_t));
   buffer_index += 2;
-  memcpy(&send_buffer[buffer_index], packet->answers->name, 2);
+  memcpy(&send_buffer[buffer_index], packet->answer.name, 2);
   buffer_index += 2;
-  memcpy(&send_buffer[buffer_index], &packet->answers->type, sizeof(uint16_t));
+  memcpy(&send_buffer[buffer_index], &packet->answer.type, sizeof(uint16_t));
   buffer_index += 2;
-  memcpy(&send_buffer[buffer_index], &packet->answers->class, sizeof(uint16_t));
+  memcpy(&send_buffer[buffer_index], &packet->answer.class, sizeof(uint16_t));
   buffer_index += 2;
-  memcpy(&send_buffer[buffer_index], &packet->answers->ttl, sizeof(uint32_t));
+  memcpy(&send_buffer[buffer_index], &packet->answer.ttl, sizeof(uint32_t));
   buffer_index += 4;
-  memcpy(&send_buffer[buffer_index], &packet->answers->rdlength,
+  memcpy(&send_buffer[buffer_index], &packet->answer.rdlength,
          sizeof(uint16_t));
   buffer_index += 2;
-  memcpy(&send_buffer[buffer_index], &packet->answers->rdata, sizeof(uint32_t));
+  memcpy(&send_buffer[buffer_index], &packet->answer.rdata, sizeof(uint32_t));
   buffer_index += 4;
 
   sendto(sock, send_buffer, buffer_index, 0, (struct sockaddr*)&client_address,
          client_address_len);
-  print_dns_packet(packet);
 
   dns_header_byte_inverse(packet);
-  dns_question_byte_inverse(packet, 0);
-  dns_answer_byte_inverse(packet, 0);
-
-  print_dns_packet(packet);
+  dns_question_byte_inverse(packet);
+  dns_answer_byte_inverse(packet);
 }
 
 void free_dns_packet(DNSPacket* packet) {
-  int number_of_questions = packet->header.number_of_questions;
-  int number_of_answers = packet->header.number_of_answers;
-  for (int i = 0; i < number_of_questions; i++) {
-    if (packet->queries[i].name) {
-      free(packet->queries[i].name);
-    }
+  if (packet->question.name) {
+    free(packet->question.name);
   }
-  for (int i = 0; i < number_of_answers; i++) {
-    if (packet->answers[i].name) {
-      free(packet->answers[i].name);
-    }
+  if (packet->answer.name) {
+    free(packet->answer.name);
   }
-  if (packet->queries)
-    free(packet->queries);
-  if (packet->answers)
-    free(packet->answers);
+}
+
+DNSPacket new_dns_packet() {
+  DNSPacket packet = {
+      .answer =
+          {
+              .name = NULL,
+          },
+      .question =
+          {
+              .name = NULL,
+              .name_len = 0,
+          },
+  };
+  return packet;
 }
 
 void dns_service_start(struct in_addr interface_address) {
@@ -259,7 +252,7 @@ void dns_service_start(struct in_addr interface_address) {
     LOG_ERR("Bind failed");
   }
 
-  static DNSPacket packet;
+  DNSPacket packet;
   static uint8_t buffer[BUFFER_SIZE];
   int buffer_index = 0;
 
@@ -273,60 +266,49 @@ void dns_service_start(struct in_addr interface_address) {
 
     buffer_index = 0;
     dns_parser_state = DNS_PARSER_STATE_HEADER;
+    packet = new_dns_packet();
     while (buffer_index < received_bytes) {
       if (dns_parser_state == DNS_PARSER_STATE_HEADER) {
         if (buffer_index + sizeof(DNSHeader) > received_bytes) {
           break;
         }
         memcpy(&packet.header, &buffer[buffer_index], sizeof(DNSHeader));
-
         buffer_index += sizeof(DNSHeader);
         dns_parser_state = DNS_PARSER_STATE_HOSTNAME;
         dns_header_byte_inverse(&packet);
-        packet.queries =
-            packet.header.number_of_questions
-                ? malloc(packet.header.number_of_questions * sizeof(DNSQuery))
-                : NULL;
-        packet.answers = NULL;
-        for (int i = 0; i < packet.header.number_of_questions; i++) {
-          packet.queries[i].name = NULL;
-          packet.queries[i].name_len = 0;
-        }
       } else if (dns_parser_state == DNS_PARSER_STATE_HOSTNAME) {
         int label_len = buffer[buffer_index];
         if (buffer_index + label_len > received_bytes) {
           break;
         }
-        if (label_len == 0 && packet.queries[0].name != NULL) {
-          packet.queries[0].name[packet.queries[0].name_len - 1] = '\0';
+        if (label_len == 0 && packet.question.name != NULL) {
+          packet.question.name[packet.question.name_len - 1] = '\0';
           // here name_len will represent the string len not array len
-          packet.queries[0].name_len--;
+          packet.question.name_len--;
           dns_parser_state = DNS_PARSER_STATE_TYPE_CLASS;
           buffer_index++;
           continue;
         }
         buffer_index++;
         // len here represent the array len not string len
-        int name_len = packet.queries[0].name_len;
+        int name_len = packet.question.name_len;
         int new_name_len = name_len + label_len + 1;
-        packet.queries[0].name = realloc(packet.queries[0].name, new_name_len);
-        memcpy(&packet.queries[0].name[name_len], &buffer[buffer_index],
+        packet.question.name = realloc(packet.question.name, new_name_len);
+        memcpy(&packet.question.name[name_len], &buffer[buffer_index],
                label_len);
-        packet.queries[0].name[new_name_len - 1] = '.';
-        packet.queries[0].name_len = new_name_len;
+        packet.question.name[new_name_len - 1] = '.';
+        packet.question.name_len = new_name_len;
         buffer_index += label_len;
       } else if (dns_parser_state == DNS_PARSER_STATE_TYPE_CLASS) {
         if (buffer_index + 2 * sizeof(uint16_t) > received_bytes) {
           break;
         }
-        memcpy(&packet.queries[0].type, &buffer[buffer_index],
-               sizeof(uint16_t));
+        memcpy(&packet.question.type, &buffer[buffer_index], sizeof(uint16_t));
         buffer_index += sizeof(uint16_t);
-        memcpy(&packet.queries[0].class, &buffer[buffer_index],
-               sizeof(uint16_t));
+        memcpy(&packet.question.class, &buffer[buffer_index], sizeof(uint16_t));
         buffer_index += sizeof(uint16_t);
-        dns_question_byte_inverse(&packet, 0);
-        dns_answer_byte_inverse(&packet, 0);
+        dns_question_byte_inverse(&packet);
+        dns_answer_byte_inverse(&packet);
         dns_packet_received_callback(sock, client_address, client_address_len,
                                      &packet);
         free_dns_packet(&packet);
