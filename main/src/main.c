@@ -6,6 +6,9 @@
 #include "zephyr/net/http/service.h"
 #include "zephyr/net/net_if.h"
 #include "zephyr/net/net_ip.h"
+#include "zephyr/net/net_mgmt.h"
+#include "zephyr/net/wifi.h"
+#include "zephyr/net/wifi_mgmt.h"
 
 #include "http_resources.h"
 
@@ -35,24 +38,36 @@ HTTP_SERVICE_DEFINE(http_service,
 REGISTER_STATIC_RESOURCES(http_server)
 
 int main() {
-  struct net_if* ethernet_interface = net_if_get_default();
-  struct in_addr interface_address;
+  struct net_if* iface = net_if_get_wifi_sap();
+  struct in_addr iface_address;
   struct in_addr subnet_mask;
   struct in_addr dhcp_base_address;
 
-  net_addr_pton(AF_INET, "192.168.10.1", &interface_address);
+  net_addr_pton(AF_INET, "192.168.10.1", &iface_address);
   net_addr_pton(AF_INET, "255.255.255.0", &subnet_mask);
   net_addr_pton(AF_INET, "192.168.10.10", &dhcp_base_address);
 
-  net_if_ipv4_addr_add(ethernet_interface, &interface_address, NET_ADDR_MANUAL,
-                       0);
-  net_if_ipv4_set_netmask_by_addr(ethernet_interface, &interface_address,
-                                  &subnet_mask);
-  net_if_ipv4_set_gw(ethernet_interface, &interface_address);
-  net_dhcpv4_server_start(ethernet_interface, &dhcp_base_address);
+  net_if_ipv4_addr_add(iface, &iface_address, NET_ADDR_MANUAL, 0);
+  net_if_ipv4_set_netmask_by_addr(iface, &iface_address, &subnet_mask);
+  net_if_ipv4_set_gw(iface, &iface_address);
+
+  struct wifi_connect_req_params ap_config = {
+      .ssid = "Gopmur ESP-32",
+      .ssid_length = strlen("Gopmur ESP-32"),
+      .psk = "12345678",
+      .psk_length = strlen("123456789"),
+      .band = WIFI_FREQ_BAND_2_4_GHZ,
+      .channel = 6,
+      .security = WIFI_SECURITY_TYPE_PSK,
+  };
+
+  net_mgmt(NET_REQUEST_WIFI_AP_ENABLE, iface, &ap_config,
+           sizeof(struct wifi_connect_req_params));
+  
+           net_dhcpv4_server_start(iface, &dhcp_base_address);
 
   http_server_start();
 
-  dns_service_start(interface_address);
+  dns_service_start(iface_address);
   return 0;
 }

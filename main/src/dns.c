@@ -154,12 +154,12 @@ DNSPacket new_dns_packet() {
   return packet;
 }
 
-void dns_service_start(struct in_addr interface_address) {
+void dns_service_start(struct in_addr iface_address) {
   const int buffer_size = 64;
   int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 
   struct sockaddr_in sock_addres = {
-      .sin_addr = interface_address,
+      .sin_addr = iface_address,
       .sin_port = htons(53),
       .sin_family = AF_INET,
   };
@@ -171,7 +171,7 @@ void dns_service_start(struct in_addr interface_address) {
   }
 
   DNSPacket packet;
-  uint8_t buffer[buffer_size];
+  static uint8_t buffer[64];
   int i = 0;
 
   DNSParserState dns_parser_state = DNS_PARSER_STATE_HEADER;
