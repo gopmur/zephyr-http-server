@@ -35,6 +35,40 @@ HTTP_SERVICE_DEFINE(http_service,
                     "Default http service on 80",
                     NULL);
 
+int dyn_handler(struct http_client_ctx* client,
+                enum http_data_status status,
+                const struct http_request_ctx* request_ctx,
+                struct http_response_ctx* response_ctx,
+                void* user_data) {
+  // static const char response[] = "Hello";  // Persistent storage
+
+  // thread_analyzer_print(0);
+
+  if (status == HTTP_SERVER_DATA_FINAL) {
+    LOG_INF("Hello");
+    response_ctx->status = 200;
+    response_ctx->body = "Hello";  // Safe: static buffer
+    response_ctx->body_len = strlen("Hello");
+    response_ctx->final_chunk = true;
+  }
+  return 0;
+}
+struct http_resource_detail_dynamic dyn_resource_detail = {
+    .common =
+        {
+            .type = HTTP_RESOURCE_TYPE_DYNAMIC,
+            .bitmask_of_supported_http_methods = BIT(HTTP_GET) | BIT(HTTP_POST),
+            .content_type = "text/plain",
+        },
+    .cb = dyn_handler,
+    .user_data = NULL,
+};
+
+HTTP_RESOURCE_DEFINE(dyn_resource,
+                     http_service,
+                     "/toggle-led",
+                     &dyn_resource_detail);
+
 REGISTER_STATIC_RESOURCES(http_server)
 
 int main() {
@@ -55,7 +89,7 @@ int main() {
       .ssid = "Gopmur ESP-32",
       .ssid_length = strlen("Gopmur ESP-32"),
       .psk = "12345678",
-      .psk_length = strlen("123456789"),
+      .psk_length = strlen("12345678"),
       .band = WIFI_FREQ_BAND_2_4_GHZ,
       .channel = 6,
       .security = WIFI_SECURITY_TYPE_PSK,
@@ -63,8 +97,8 @@ int main() {
 
   net_mgmt(NET_REQUEST_WIFI_AP_ENABLE, iface, &ap_config,
            sizeof(struct wifi_connect_req_params));
-  
-           net_dhcpv4_server_start(iface, &dhcp_base_address);
+
+  net_dhcpv4_server_start(iface, &dhcp_base_address);
 
   http_server_start();
 
